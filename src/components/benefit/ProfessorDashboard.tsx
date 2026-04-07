@@ -2,83 +2,90 @@ import { useState, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Dumbbell, Plus, Loader2, Trash2 } from "lucide-react";
+import { Dumbbell, Plus, Loader2, Edit, Power, PowerOff } from "lucide-react";
+import WorkoutForm, { ExerciseInput, emptyExercise } from "./WorkoutForm";
 
 interface Student {
   id: string;
   full_name: string;
 }
 
-interface ExerciseInput {
-  exercise_name: string;
-  sets: number;
-  reps: string;
-  weight: string;
-  rest_seconds: number;
-  notes: string;
+interface WorkoutWithExercises {
+  id: string;
+  title: string;
+  description: string | null;
+  active: boolean;
+  student_id: string;
+  student_name?: string;
+  created_at: string;
+  exercises: ExerciseInput[];
 }
-
-const emptyExercise = (): ExerciseInput => ({
-  exercise_name: "",
-  sets: 3,
-  reps: "12",
-  weight: "",
-  rest_seconds: 60,
-  notes: "",
-});
 
 const ProfessorDashboard = () => {
   const { user } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedStudent, setSelectedStudent] = useState<string>("");
-  const [workoutTitle, setWorkoutTitle] = useState("");
-  const [workoutDesc, setWorkoutDesc] = useState("");
-  const [exercises, setExercises] = useState<ExerciseInput[]>([emptyExercise()]);
   const [saving, setSaving] = useState(false);
+  const [view, setView] = useState<"list" | "create" | "edit">("list");
+  const [workouts, setWorkouts] = useState<WorkoutWithExercises[]>([]);
+  const [editingWorkout, setEditingWorkout] = useState<WorkoutWithExercises | null>(null);
 
-  useEffect(() => {
-    supabase
-      .from("students")
-      .select("id, full_name")
-      .eq("active", true)
-      .order("full_name")
-      .then(({ data }) => {
-        setStudents((data as Student[]) || []);
-        setLoading(false);
-      });
-  }, []);
+  const fetchData = async () => {
+    setLoading(true);
+    const [studentsRes, workoutsRes] = await Promise.all([
+      supabase.from("students").select("id, full_name").eq("active", true).order("full_name"),
+      supabase.from("workouts").select("*").eq("professor_id", user!.id).order("created_at", { ascending: false }),
+    ]);
 
-  const addExercise = () => setExercises([...exercises, emptyExercise()]);
+    const studentsList = (studentsRes.data as Student[]) || [];
+    setStudents(studentsList);
 
-  const removeExercise = (idx: number) => {
-    setExercises(exercises.filter((_, i) => i !== idx));
+    const wData = workoutsRes.data || [];
+    if (wData.length > 0) {
+      const { data: exData } = await supabase
+        .from("workout_exercises")
+        .select("*")
+        .in("workout_id", wData.map((w) => w.id))
+        .order("order_index");
+
+      const mapped: WorkoutWithExercises[] = wData.map((w) => ({
+        id: w.id,
+        title: w.title,
+        description: w.description,
+        active: w.active,
+        student_id: w.student_id,
+        student_name: studentsList.find((s) => s.id === w.student_id)?.full_name,
+        created_at: w.created_at,
+        exercises: (exData || [])
+          .filter((e) => e.workout_id === w.id)
+          .map((e) => ({
+            exercise_name: e.exercise_name,
+            sets: e.sets,
+            reps: e.reps,
+            weight: e.weight || "",
+            rest_seconds: e.rest_seconds || 60,
+            notes: e.notes || "",
+          })),
+      }));
+      setWorkouts(mapped);
+    } else {
+      setWorkouts([]);
+    }
+    setLoading(false);
   };
 
-  const updateExercise = (idx: number, field: keyof ExerciseInput, value: string | number) => {
-    const updated = [...exercises];
-    (updated[idx] as any)[field] = value;
-    setExercises(updated);
-  };
+  useEffect(() => { fetchData(); }, []);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedStudent || !workoutTitle || exercises.length === 0) {
+  const handleCreate = async (data: { studentId: string; title: string; description: string; exercises: ExerciseInput[] }) => {
+    if (!data.studentId || !data.title || data.exercises.length === 0) {
       toast.error("Preencha todos os campos");
       return;
     }
     setSaving(true);
-
     const { data: workout, error } = await supabase
       .from("workouts")
-      .insert({
-        student_id: selectedStudent,
-        professor_id: user!.id,
-        title: workoutTitle,
-        description: workoutDesc || null,
-      })
+      .insert({ student_id: data.studentId, professor_id: user!.id, title: data.title, description: data.description || null })
       .select("id")
       .single();
 
@@ -88,29 +95,61 @@ const ProfessorDashboard = () => {
       return;
     }
 
-    const exerciseRows = exercises.map((ex, i) => ({
-      workout_id: workout.id,
-      exercise_name: ex.exercise_name,
-      sets: ex.sets,
-      reps: ex.reps,
-      weight: ex.weight || null,
-      rest_seconds: ex.rest_seconds,
-      notes: ex.notes || null,
-      order_index: i,
+    const rows = data.exercises.map((ex, i) => ({
+      workout_id: workout.id, exercise_name: ex.exercise_name, sets: ex.sets,
+      reps: ex.reps, weight: ex.weight || null, rest_seconds: ex.rest_seconds,
+      notes: ex.notes || null, order_index: i,
     }));
 
-    const { error: exError } = await supabase.from("workout_exercises").insert(exerciseRows);
+    const { error: exError } = await supabase.from("workout_exercises").insert(rows);
+    if (exError) toast.error("Treino criado mas erro nos exercícios: " + exError.message);
+    else toast.success("Treino montado com sucesso!");
 
-    if (exError) {
-      toast.error("Treino criado mas erro nos exercícios: " + exError.message);
-    } else {
-      toast.success("Treino montado com sucesso!");
-      setWorkoutTitle("");
-      setWorkoutDesc("");
-      setExercises([emptyExercise()]);
-      setSelectedStudent("");
-    }
     setSaving(false);
+    setView("list");
+    fetchData();
+  };
+
+  const handleEdit = async (data: { studentId: string; title: string; description: string; exercises: ExerciseInput[] }) => {
+    if (!editingWorkout) return;
+    setSaving(true);
+
+    const { error } = await supabase
+      .from("workouts")
+      .update({ title: data.title, description: data.description || null })
+      .eq("id", editingWorkout.id);
+
+    if (error) {
+      toast.error("Erro ao atualizar treino: " + error.message);
+      setSaving(false);
+      return;
+    }
+
+    // Delete old exercises and insert new ones
+    await supabase.from("workout_exercises").delete().eq("workout_id", editingWorkout.id);
+    const rows = data.exercises.map((ex, i) => ({
+      workout_id: editingWorkout.id, exercise_name: ex.exercise_name, sets: ex.sets,
+      reps: ex.reps, weight: ex.weight || null, rest_seconds: ex.rest_seconds,
+      notes: ex.notes || null, order_index: i,
+    }));
+    const { error: exError } = await supabase.from("workout_exercises").insert(rows);
+    if (exError) toast.error("Erro nos exercícios: " + exError.message);
+    else toast.success("Treino atualizado!");
+
+    setSaving(false);
+    setView("list");
+    setEditingWorkout(null);
+    fetchData();
+  };
+
+  const toggleActive = async (workout: WorkoutWithExercises) => {
+    const newActive = !workout.active;
+    const { error } = await supabase.from("workouts").update({ active: newActive }).eq("id", workout.id);
+    if (error) toast.error("Erro: " + error.message);
+    else {
+      toast.success(newActive ? "Treino ativado" : "Treino desativado");
+      fetchData();
+    }
   };
 
   if (loading) {
@@ -121,89 +160,91 @@ const ProfessorDashboard = () => {
     );
   }
 
+  if (view === "create") {
+    return (
+      <div className="space-y-6">
+        <h1 className="font-heading text-3xl font-bold flex items-center gap-2">
+          <Dumbbell className="w-7 h-7 text-primary" /> Novo Treino
+        </h1>
+        <WorkoutForm students={students} saving={saving} onSubmit={handleCreate} onCancel={() => setView("list")} />
+      </div>
+    );
+  }
+
+  if (view === "edit" && editingWorkout) {
+    return (
+      <div className="space-y-6">
+        <h1 className="font-heading text-3xl font-bold flex items-center gap-2">
+          <Edit className="w-7 h-7 text-primary" /> Editar Treino
+        </h1>
+        <WorkoutForm
+          students={students}
+          initialStudent={editingWorkout.student_id}
+          initialTitle={editingWorkout.title}
+          initialDesc={editingWorkout.description || ""}
+          initialExercises={editingWorkout.exercises}
+          saving={saving}
+          onSubmit={handleEdit}
+          onCancel={() => { setView("list"); setEditingWorkout(null); }}
+          submitLabel="Atualizar Treino"
+          disableStudentSelect
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <h1 className="font-heading text-3xl font-bold flex items-center gap-2">
-        <Dumbbell className="w-7 h-7 text-primary" /> Montar Treino
-      </h1>
+      <div className="flex items-center justify-between">
+        <h1 className="font-heading text-3xl font-bold flex items-center gap-2">
+          <Dumbbell className="w-7 h-7 text-primary" /> Treinos
+        </h1>
+        <Button onClick={() => setView("create")}>
+          <Plus className="w-4 h-4 mr-2" /> Novo Treino
+        </Button>
+      </div>
 
-      <form onSubmit={handleSave} className="space-y-6">
-        <div className="bg-card border border-border rounded-xl p-6 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Aluno</label>
-              <select
-                value={selectedStudent}
-                onChange={(e) => setSelectedStudent(e.target.value)}
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                required
-              >
-                <option value="">Selecione um aluno...</option>
-                {students.map((s) => (
-                  <option key={s.id} value={s.id}>{s.full_name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Título do Treino</label>
-              <Input value={workoutTitle} onChange={(e) => setWorkoutTitle(e.target.value)} placeholder="Ex: Treino A - Peito e Tríceps" required />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Descrição (opcional)</label>
-            <textarea
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[60px]"
-              value={workoutDesc}
-              onChange={(e) => setWorkoutDesc(e.target.value)}
-              placeholder="Observações gerais do treino..."
-            />
-          </div>
+      {workouts.length === 0 ? (
+        <div className="bg-card border border-border rounded-xl p-12 text-center">
+          <Dumbbell className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+          <p className="text-muted-foreground">Nenhum treino criado ainda.</p>
         </div>
-
+      ) : (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="font-heading text-xl font-bold">Exercícios</h2>
-            <Button type="button" variant="outline" size="sm" onClick={addExercise}>
-              <Plus className="w-4 h-4 mr-1" /> Adicionar
-            </Button>
-          </div>
-
-          {exercises.map((ex, i) => (
-            <div key={i} className="bg-card border border-border rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-primary">Exercício {i + 1}</span>
-                {exercises.length > 1 && (
-                  <Button type="button" variant="ghost" size="icon" onClick={() => removeExercise(i)}>
-                    <Trash2 className="w-4 h-4 text-destructive" />
-                  </Button>
-                )}
+          {workouts.map((w) => (
+            <div key={w.id} className={`bg-card border rounded-xl p-5 flex items-center justify-between gap-4 ${w.active ? "border-border" : "border-border opacity-60"}`}>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-heading font-bold truncate">{w.title}</h3>
+                  {!w.active && (
+                    <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full">Inativo</span>
+                  )}
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Aluno: {w.student_name || "—"} · {w.exercises.length} exercício(s)
+                </p>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                <div className="col-span-2 space-y-1">
-                  <label className="text-xs text-muted-foreground">Nome</label>
-                  <Input value={ex.exercise_name} onChange={(e) => updateExercise(i, "exercise_name", e.target.value)} placeholder="Supino reto" required />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">Séries</label>
-                  <Input type="number" value={ex.sets} onChange={(e) => updateExercise(i, "sets", parseInt(e.target.value) || 0)} min={1} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">Reps</label>
-                  <Input value={ex.reps} onChange={(e) => updateExercise(i, "reps", e.target.value)} placeholder="12" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">Peso</label>
-                  <Input value={ex.weight} onChange={(e) => updateExercise(i, "weight", e.target.value)} placeholder="20kg" />
-                </div>
+              <div className="flex gap-2 shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setEditingWorkout(w); setView("edit"); }}
+                >
+                  <Edit className="w-4 h-4 mr-1" /> Editar
+                </Button>
+                <Button
+                  variant={w.active ? "ghost" : "outline"}
+                  size="sm"
+                  onClick={() => toggleActive(w)}
+                  title={w.active ? "Desativar" : "Ativar"}
+                >
+                  {w.active ? <PowerOff className="w-4 h-4 text-destructive" /> : <Power className="w-4 h-4 text-primary" />}
+                </Button>
               </div>
             </div>
           ))}
         </div>
-
-        <Button type="submit" className="w-full md:w-auto" disabled={saving}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Salvar Treino"}
-        </Button>
-      </form>
+      )}
     </div>
   );
 };
